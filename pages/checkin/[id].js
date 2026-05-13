@@ -25,24 +25,37 @@ function getArabicDate(dateStr) {
   return `${parseInt(d)} ${months[parseInt(m) - 1]} ${y}`
 }
 
+function weekStartStr() {
+  const now = new Date()
+  const start = new Date(now)
+  start.setDate(now.getDate() - now.getDay())
+  return start.toISOString().split('T')[0]
+}
+
+function monthStartStr() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+}
+
 export default function CheckIn() {
   const router = useRouter()
   const { id } = router.query
 
   const [employee, setEmployee] = useState(null)
-  const [todayEntry, setTodayEntry] = useState(null)
-  const [recentEntries, setRecentEntries] = useState([])
+  const [openEntry, setOpenEntry] = useState(null)
+  const [allEntries, setAllEntries] = useState([])
   const [loading, setLoading] = useState(true)
   const [time, setTime] = useState('')
-  const [date, setDate] = useState('')
+  const [dateStr, setDateStr] = useState('')
   const [msg, setMsg] = useState(null)
   const [working, setWorking] = useState(false)
+  const [summaryMode, setSummaryMode] = useState('week')
 
   useEffect(() => {
     const tick = () => {
       const now = new Date()
       setTime(now.toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }))
-      setDate(now.toISOString().split('T')[0])
+      setDateStr(now.toISOString().split('T')[0])
     }
     tick()
     const interval = setInterval(tick, 1000)
@@ -51,27 +64,29 @@ export default function CheckIn() {
 
   useEffect(() => {
     if (!id) return
-    loadEmployee()
+    loadData()
   }, [id])
 
-  async function loadEmployee() {
+  async function loadData() {
     setLoading(true)
     const { data: emp } = await supabase.from('employees').select('*').eq('id', id).single()
     if (!emp) { setLoading(false); return }
     setEmployee(emp)
 
-    const today = todayStr()
+    const since = new Date(); since.setDate(since.getDate() - 60)
+    const sinceStr = since.toISOString().split('T')[0]
+
     const { data: entries } = await supabase
       .from('entries')
       .select('*')
       .eq('employee_id', id)
+      .gte('date', sinceStr)
       .order('date', { ascending: false })
       .order('created_at', { ascending: false })
-      .limit(10)
 
-    const todayE = entries?.find(e => e.date === today && !e.check_out)
-    setTodayEntry(todayE || null)
-    setRecentEntries(entries || [])
+    const all = entries || []
+    setAllEntries(all)
+    setOpenEntry(all.find(e => !e.check_out) || null)
     setLoading(false)
   }
 
@@ -81,56 +96,43 @@ export default function CheckIn() {
   }
 
   async function handleCheckIn() {
+    if (openEntry) { showMsg('أنت مسجّل دخول بالفعل. سجّل خروجك أولاً.', 'error'); return }
     setWorking(true)
     const now = new Date()
     const timeStr = now.toTimeString().slice(0, 8)
     const today = now.toISOString().split('T')[0]
-
-    // Check if already checked in today (without checkout)
-    const existing = recentEntries.find(e => e.date === today && !e.check_out)
-    if (existing) {
-      showMsg('أنت مسجّل دخول بالفعل اليوم. يرجى تسجيل الخروج أولاً.', 'error')
-      setWorking(false); return
-    }
-
-    const { error } = await supabase.from('entries').insert({
-      employee_id: id,
-      date: today,
-      check_in: timeStr,
-      minutes: 0,
-    })
+    const { error } = await supabase.from('entries').insert({ employee_id: id, date: today, check_in: timeStr, minutes: 0 })
     if (error) showMsg('حدث خطأ: ' + error.message, 'error')
-    else { showMsg('تم تسجيل الدخول بنجاح ✓'); loadEmployee() }
+    else { showMsg('✅ تم تسجيل الدخول'); loadData() }
     setWorking(false)
   }
 
   async function handleCheckOut() {
-    if (!todayEntry) return
+    if (!openEntry) return
     setWorking(true)
     const now = new Date()
     const timeStr = now.toTimeString().slice(0, 8)
-    const inTime = todayEntry.check_in
-    const [ih, im, is_] = inTime.split(':').map(Number)
+    const [ih, im] = openEntry.check_in.split(':').map(Number)
     const [oh, om] = timeStr.split(':').map(Number)
-    const minutes = (oh * 60 + om) - (ih * 60 + im)
-
-    const { error } = await supabase.from('entries').update({
-      check_out: timeStr,
-      minutes: Math.max(0, minutes)
-    }).eq('id', todayEntry.id)
-
+    const minutes = Math.max(0, (oh * 60 + om) - (ih * 60 + im))
+    const { error } = await supabase.from('entries').update({ check_out: timeStr, minutes }).eq('id', openEntry.id)
     if (error) showMsg('حدث خطأ: ' + error.message, 'error')
-    else { showMsg(`تم تسجيل الخروج ✓ عملت ${fmtHours(Math.max(0, minutes))} ساعة اليوم`); loadEmployee() }
+    else { showMsg(`🔴 تم تسجيل الخروج — ${fmtHours(minutes)} في هذه الجلسة`); loadData() }
     setWorking(false)
   }
 
-  // Weekly summary
-  const now = new Date()
-  const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay())
-  const weekStartStr = weekStart.toISOString().split('T')[0]
-  const weekEntries = recentEntries.filter(e => e.date >= weekStartStr)
-  const weekMins = weekEntries.reduce((s, e) => s + (e.minutes || 0), 0)
-  const weekDays = new Set(weekEntries.map(e => e.date)).size
+  const today = todayStr()
+  const wStart = weekStartStr()
+  const mStart = monthStartStr()
+
+  const todayEntries = allEntries.filter(e => e.date === today)
+  const todayMins = todayEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+
+  const weekMins = allEntries.filter(e => e.date >= wStart).reduce((s, e) => s + (e.minutes || 0), 0)
+  const weekDays = new Set(allEntries.filter(e => e.date >= wStart).map(e => e.date)).size
+
+  const monthMins = allEntries.filter(e => e.date >= mStart).reduce((s, e) => s + (e.minutes || 0), 0)
+  const monthDays = new Set(allEntries.filter(e => e.date >= mStart).map(e => e.date)).size
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', flexDirection: 'column', gap: 12 }}>
@@ -142,13 +144,9 @@ export default function CheckIn() {
   if (!employee) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', flexDirection: 'column', gap: 12 }}>
       <div style={{ fontSize: '3rem' }}>❌</div>
-      <div style={{ color: '#e24b4a', fontWeight: 600, fontSize: '1.1rem' }}>لم يتم العثور على الموظفة</div>
-      <div style={{ color: '#9ca3af', fontSize: '0.875rem' }}>يرجى التحقق من الرابط</div>
+      <div style={{ color: '#e24b4a', fontWeight: 600 }}>لم يتم العثور على الموظف</div>
     </div>
   )
-
-  const isCheckedIn = !!todayEntry
-  const todayCheckedOut = recentEntries.find(e => e.date === todayStr() && e.check_out)
 
   return (
     <>
@@ -159,7 +157,7 @@ export default function CheckIn() {
 
       <header className="header">
         <div className="container header-inner">
-          <h1>🕐 تسجيل الحضور والانصراف</h1>
+          <h1>🕐 الحضور والانصراف</h1>
           <span className="header-badge">{employee.name}</span>
         </div>
       </header>
@@ -167,85 +165,131 @@ export default function CheckIn() {
       <div className="container" style={{ paddingTop: '1.5rem', paddingBottom: '3rem' }}>
         {msg && <div className={`alert alert-${msg.type}`}>{msg.text}</div>}
 
-        {/* Clock */}
+        {/* Clock + Action */}
         <div className="card checkin-card">
           <div className="clock-display">
             <div className="clock-time">{time}</div>
-            <div className="clock-date">{date ? `${getArabicDay(date)}، ${getArabicDate(date)}` : ''}</div>
+            <div className="clock-date">{dateStr ? `${getArabicDay(dateStr)}، ${getArabicDate(dateStr)}` : ''}</div>
           </div>
 
-          {/* Status indicator */}
+          {/* Status */}
           <div style={{
-            textAlign: 'center', padding: '1rem',
-            background: isCheckedIn ? '#e1f5ee' : todayCheckedOut ? '#f3f4f6' : '#faeeda',
-            borderRadius: 10, margin: '0 0 1.5rem'
+            textAlign: 'center', padding: '0.85rem 1rem',
+            background: openEntry ? '#e1f5ee' : '#f9fafb',
+            borderRadius: 10, marginBottom: '1.25rem',
+            border: `1px solid ${openEntry ? '#9fe1cb' : '#e5e7eb'}`
           }}>
-            <div style={{ fontWeight: 700, fontSize: '1rem', color: isCheckedIn ? '#085041' : todayCheckedOut ? '#4b5563' : '#854f0b' }}>
-              {isCheckedIn
-                ? `✅ مسجّل دخول منذ ${todayEntry.check_in?.slice(0, 5)}`
-                : todayCheckedOut
-                  ? `✓ أنهيت يوم العمل (${todayCheckedOut.check_in?.slice(0, 5)} - ${todayCheckedOut.check_out?.slice(0, 5)})`
-                  : '⏰ لم تسجل دخولك اليوم بعد'}
-            </div>
+            {openEntry
+              ? <div style={{ fontWeight: 700, color: '#085041' }}>✅ مسجّل دخول منذ {openEntry.check_in?.slice(0, 5)}</div>
+              : <div style={{ color: '#6b7280' }}>⏸ غير مسجّل حالياً</div>
+            }
+            {todayMins > 0 && (
+              <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: 4 }}>
+                إجمالي اليوم حتى الآن: <strong>{fmtHours(todayMins)}</strong> ساعة ({todayEntries.filter(e=>e.check_out).length} جلسة)
+              </div>
+            )}
           </div>
 
-          {/* Action buttons */}
-          {!todayCheckedOut && (
-            <div style={{ display: 'flex', gap: 12, flexDirection: isCheckedIn ? 'column' : 'row' }}>
-              {!isCheckedIn && (
-                <button className="btn btn-primary btn-lg" onClick={handleCheckIn} disabled={working}>
-                  {working ? '⏳ جارٍ التسجيل...' : '🟢 تسجيل الدخول'}
-                </button>
-              )}
-              {isCheckedIn && (
-                <button className="btn btn-lg" style={{ background: '#e24b4a', color: 'white', width: '100%', justifyContent: 'center' }}
-                  onClick={handleCheckOut} disabled={working}>
-                  {working ? '⏳ جارٍ التسجيل...' : '🔴 تسجيل الخروج'}
-                </button>
-              )}
+          {/* Buttons - both always visible */}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button
+              className="btn btn-primary btn-lg"
+              onClick={handleCheckIn}
+              disabled={working || !!openEntry}
+              style={{ flex: 1, opacity: openEntry ? 0.4 : 1 }}
+            >
+              🟢 تسجيل دخول
+            </button>
+            <button
+              className="btn btn-lg"
+              onClick={handleCheckOut}
+              disabled={working || !openEntry}
+              style={{ flex: 1, background: openEntry ? '#e24b4a' : '#f3f4f6', color: openEntry ? 'white' : '#9ca3af', justifyContent: 'center', opacity: !openEntry ? 0.5 : 1 }}
+            >
+              🔴 تسجيل خروج
+            </button>
+          </div>
+
+          {/* Today's sessions */}
+          {todayEntries.length > 0 && (
+            <div style={{ marginTop: '1.25rem', borderTop: '1px solid #f3f4f6', paddingTop: '1rem' }}>
+              <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#6b7280', marginBottom: '0.6rem' }}>📍 جلسات اليوم</div>
+              {todayEntries.slice().reverse().map((e, i) => (
+                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.4rem 0.6rem', background: '#f9fafb', borderRadius: 6, marginBottom: 4 }}>
+                  <span style={{ fontSize: '0.85rem', color: '#374151' }}>
+                    جلسة {i + 1}: {e.check_in?.slice(0, 5)} ← {e.check_out ? e.check_out.slice(0, 5) : '...'}
+                  </span>
+                  {e.check_out
+                    ? <span className="badge badge-green">{fmtHours(e.minutes)}</span>
+                    : <span className="badge badge-amber">جارية</span>
+                  }
+                </div>
+              ))}
+              <div style={{ marginTop: '0.5rem', textAlign: 'left', fontWeight: 700, fontSize: '0.9rem', color: '#085041' }}>
+                مجموع اليوم: {fmtHours(todayMins)}
+              </div>
             </div>
           )}
         </div>
 
-        {/* Weekly summary */}
-        <div className="stats-grid" style={{ maxWidth: 480, margin: '0 auto 1.25rem' }}>
-          <div className="stat-card">
-            <div className="stat-value">{weekDays}</div>
-            <div className="stat-label">أيام هذا الأسبوع</div>
+        {/* Summary */}
+        <div className="card" style={{ maxWidth: 480, margin: '0 auto 1.25rem' }}>
+          <div className="card-title">📊 ملخص ساعاتي</div>
+          <div className="tabs" style={{ marginBottom: '1rem' }}>
+            {[['today','اليوم'],['week','الأسبوع'],['month','الشهر']].map(([k,l]) => (
+              <button key={k} className={`tab-btn ${summaryMode===k?'active':''}`} onClick={() => setSummaryMode(k)}>{l}</button>
+            ))}
           </div>
-          <div className="stat-card">
-            <div className="stat-value">{fmtHours(weekMins)}</div>
-            <div className="stat-label">ساعات هذا الأسبوع</div>
-          </div>
+          {summaryMode === 'today' && (
+            <div className="stats-grid">
+              <div className="stat-card"><div className="stat-value">{fmtHours(todayMins)}</div><div className="stat-label">ساعات اليوم</div></div>
+              <div className="stat-card"><div className="stat-value">{todayEntries.filter(e=>e.check_out).length}</div><div className="stat-label">جلسات مكتملة</div></div>
+            </div>
+          )}
+          {summaryMode === 'week' && (
+            <div className="stats-grid">
+              <div className="stat-card"><div className="stat-value">{fmtHours(weekMins)}</div><div className="stat-label">ساعات الأسبوع</div></div>
+              <div className="stat-card"><div className="stat-value">{weekDays}</div><div className="stat-label">أيام العمل</div></div>
+            </div>
+          )}
+          {summaryMode === 'month' && (
+            <div className="stats-grid">
+              <div className="stat-card"><div className="stat-value">{fmtHours(monthMins)}</div><div className="stat-label">ساعات الشهر</div></div>
+              <div className="stat-card"><div className="stat-value">{monthDays}</div><div className="stat-label">أيام العمل</div></div>
+            </div>
+          )}
         </div>
 
-        {/* Recent history */}
+        {/* History grouped by day */}
         <div className="card" style={{ maxWidth: 480, margin: '0 auto' }}>
-          <div className="card-title">📋 سجل الحضور الأخير</div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr><th>اليوم</th><th>الدخول</th><th>الخروج</th><th>الساعات</th></tr>
-              </thead>
-              <tbody>
-                {recentEntries.filter(e => e.check_out).map(e => (
-                  <tr key={e.id}>
-                    <td style={{ fontSize: '0.8rem' }}>{getArabicDay(e.date)}<br /><span style={{ color: '#9ca3af', fontSize: '0.75rem' }}>{e.date}</span></td>
-                    <td>{e.check_in?.slice(0, 5)}</td>
-                    <td>{e.check_out?.slice(0, 5)}</td>
-                    <td>
-                      <span className={`badge ${e.minutes >= 480 ? 'badge-green' : e.minutes >= 360 ? 'badge-amber' : 'badge-red'}`}>
-                        {fmtHours(e.minutes)}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {recentEntries.filter(e => e.check_out).length === 0 && (
-              <div className="empty"><p>لا توجد سجلات سابقة</p></div>
-            )}
-          </div>
+          <div className="card-title">📋 السجل التفصيلي</div>
+          {(() => {
+            const grouped = {}
+            allEntries.forEach(e => {
+              if (!grouped[e.date]) grouped[e.date] = []
+              grouped[e.date].push(e)
+            })
+            const dates = Object.keys(grouped).sort((a,b) => b.localeCompare(a)).slice(0, 14)
+            if (!dates.length) return <div className="empty"><p>لا توجد سجلات</p></div>
+            return dates.map(d => {
+              const dayEntries = grouped[d]
+              const dayMins = dayEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+              return (
+                <div key={d} style={{ marginBottom: '1rem', paddingBottom: '1rem', borderBottom: '1px solid #f3f4f6' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                    <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>{getArabicDay(d)} {getArabicDate(d)}</span>
+                    <span className={`badge ${dayMins >= 480 ? 'badge-green' : dayMins >= 240 ? 'badge-amber' : 'badge-gray'}`}>{fmtHours(dayMins)}</span>
+                  </div>
+                  {dayEntries.slice().reverse().map((e, i) => (
+                    <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#6b7280', padding: '0.25rem 0.5rem', background: '#f9fafb', borderRadius: 5, marginBottom: 2 }}>
+                      <span>جلسة {i+1}: {e.check_in?.slice(0,5)} ← {e.check_out ? e.check_out.slice(0,5) : '...'}</span>
+                      <span>{e.check_out ? fmtHours(e.minutes) : <span style={{color:'#ba7517'}}>جارية</span>}</span>
+                    </div>
+                  ))}
+                </div>
+              )
+            })
+          })()}
         </div>
       </div>
     </>
