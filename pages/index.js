@@ -13,10 +13,10 @@ function getInitials(name) {
 }
 
 function fmtHours(minutes) {
-  if (!minutes) return '0'
+  if (!minutes) return '0:00'
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
-  return m > 0 ? `${h}:${String(m).padStart(2, '0')}` : `${h}:00`
+  return `${h}:${String(m).padStart(2, '0')}`
 }
 
 function todayStr() {
@@ -27,7 +27,7 @@ function thisWeekRange() {
   const now = new Date()
   const day = now.getDay()
   const start = new Date(now)
-  start.setDate(now.getDate() - ((day + 1) % 7)) // Saturday start
+  start.setDate(now.getDate() - day)
   const end = new Date(start)
   end.setDate(start.getDate() + 6)
   return [start.toISOString().split('T')[0], end.toISOString().split('T')[0]]
@@ -40,19 +40,28 @@ function thisMonthRange() {
   return [start, end]
 }
 
+function getElapsed(checkInTime) {
+  // checkInTime like "09:30:00"
+  const [h, m] = checkInTime.split(':').map(Number)
+  const now = new Date()
+  const totalNowMins = now.getHours() * 60 + now.getMinutes()
+  const totalInMins = h * 60 + m
+  const diff = Math.max(0, totalNowMins - totalInMins)
+  return fmtHours(diff)
+}
+
 export default function AdminDashboard() {
-  const [tab, setTab] = useState('daily')
+  const [tab, setTab] = useState('live')
   const [employees, setEmployees] = useState([])
   const [entries, setEntries] = useState([])
   const [loading, setLoading] = useState(true)
   const [msg, setMsg] = useState(null)
+  const [nowTime, setNowTime] = useState('')
 
-  // Add employee form
   const [newName, setNewName] = useState('')
   const [newHours, setNewHours] = useState(40)
   const [addingEmp, setAddingEmp] = useState(false)
 
-  // Manual entry form
   const [selEmp, setSelEmp] = useState('')
   const [entryDate, setEntryDate] = useState(todayStr())
   const [inTime, setInTime] = useState('09:00')
@@ -60,6 +69,14 @@ export default function AdminDashboard() {
   const [addingEntry, setAddingEntry] = useState(false)
 
   const [selectedDate, setSelectedDate] = useState(todayStr())
+
+  // Live clock
+  useEffect(() => {
+    const tick = () => setNowTime(new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }))
+    tick()
+    const iv = setInterval(tick, 1000)
+    return () => clearInterval(iv)
+  }, [])
 
   const showMsg = (text, type = 'success') => {
     setMsg({ text, type })
@@ -80,7 +97,6 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     loadData()
-    // Real-time subscription
     const channel = supabase
       .channel('entries-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, () => loadData())
@@ -127,17 +143,32 @@ export default function AdminDashboard() {
     loadData()
   }
 
-  // Compute daily entries
-  const dailyEntries = entries.filter(e => e.date === selectedDate)
-  const dailyPresent = new Set(dailyEntries.map(e => e.employee_id)).size
-  const dailyTotal = dailyEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+  // ── Computed ──
+  const today = todayStr()
+  const todayEntries = entries.filter(e => e.date === today)
 
-  // Weekly
+  // Who is working NOW = has open entry today (no check_out)
+  const openEntriesMap = {} // empId -> entry
+  todayEntries.forEach(e => {
+    if (!e.check_out) openEntriesMap[e.employee_id] = e
+  })
+  const workingNow = employees.filter(emp => openEntriesMap[emp.id])
+  const notWorking = employees.filter(emp => !openEntriesMap[emp.id])
+
+  // Today totals per employee
+  const todayMinsByEmp = {}
+  todayEntries.forEach(e => {
+    if (!todayMinsByEmp[e.employee_id]) todayMinsByEmp[e.employee_id] = 0
+    todayMinsByEmp[e.employee_id] += (e.minutes || 0)
+  })
+
+  const dailyTotal = todayEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+  const dailyPresent = new Set(todayEntries.map(e => e.employee_id)).size
+
   const [wStart, wEnd] = thisWeekRange()
   const weekEntries = entries.filter(e => e.date >= wStart && e.date <= wEnd)
   const weekTotal = weekEntries.reduce((s, e) => s + (e.minutes || 0), 0)
 
-  // Monthly
   const [mStart, mEnd] = thisMonthRange()
   const monthEntries = entries.filter(e => e.date >= mStart && e.date <= mEnd)
   const monthTotal = monthEntries.reduce((s, e) => s + (e.minutes || 0), 0)
@@ -149,11 +180,7 @@ export default function AdminDashboard() {
     return { mins, days }
   }
 
-  if (loading) return (
-    <div className="loader">
-      <div>⏳ جارٍ تحميل البيانات...</div>
-    </div>
-  )
+  if (loading) return <div className="loader">⏳ جارٍ تحميل البيانات...</div>
 
   return (
     <>
@@ -165,7 +192,7 @@ export default function AdminDashboard() {
       <header className="header">
         <div className="container header-inner">
           <h1>🕐 متابعة حضور الموظفات</h1>
-          <span className="header-badge">لوحة المشرف</span>
+          <span className="header-badge">لوحة المشرف · {nowTime}</span>
         </div>
       </header>
 
@@ -175,31 +202,119 @@ export default function AdminDashboard() {
         {/* Stats */}
         <div className="stats-grid">
           <div className="stat-card">
-            <div className="stat-value">{employees.length}</div>
-            <div className="stat-label">إجمالي الموظفات</div>
+            <div className="stat-value" style={{ color: workingNow.length > 0 ? '#1d9e75' : '#9ca3af' }}>{workingNow.length}</div>
+            <div className="stat-label">⚡ يعملن الآن</div>
           </div>
           <div className="stat-card">
             <div className="stat-value">{dailyPresent}</div>
-            <div className="stat-label">حاضرات اليوم</div>
+            <div className="stat-label">حضرن اليوم</div>
           </div>
           <div className="stat-card">
             <div className="stat-value">{fmtHours(weekTotal)}</div>
-            <div className="stat-label">ساعات هذا الأسبوع</div>
+            <div className="stat-label">ساعات الأسبوع</div>
           </div>
           <div className="stat-card">
             <div className="stat-value">{fmtHours(monthTotal)}</div>
-            <div className="stat-label">ساعات هذا الشهر</div>
+            <div className="stat-label">ساعات الشهر</div>
           </div>
         </div>
 
         {/* Tabs */}
         <div className="tabs">
-          {[['daily','📅 يومي'],['weekly','📆 أسبوعي'],['monthly','🗓️ شهري'],['manual','✏️ إدخال يدوي'],['employees','👥 الموظفات']].map(([k,l]) => (
+          {[['live','⚡ من يعمل الآن'],['daily','📅 يومي'],['weekly','📆 أسبوعي'],['monthly','🗓️ شهري'],['manual','✏️ إدخال يدوي'],['employees','👥 الموظفات']].map(([k,l]) => (
             <button key={k} className={`tab-btn ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>{l}</button>
           ))}
         </div>
 
-        {/* DAILY TAB */}
+        {/* ── LIVE TAB ── */}
+        {tab === 'live' && (
+          <div>
+            {/* Working now */}
+            <div className="card">
+              <div className="card-title">
+                <span style={{ display:'inline-flex', alignItems:'center', gap:8 }}>
+                  <span style={{ width:10, height:10, borderRadius:'50%', background:'#1d9e75', display:'inline-block', boxShadow:'0 0 0 3px #e1f5ee', animation:'pulse 2s infinite' }} />
+                  يعملن الآن ({workingNow.length})
+                </span>
+              </div>
+              <style>{`@keyframes pulse { 0%,100%{box-shadow:0 0 0 3px #e1f5ee} 50%{box-shadow:0 0 0 6px #9fe1cb} }`}</style>
+              {workingNow.length === 0 ? (
+                <div className="empty"><div className="empty-icon">😴</div><p>لا أحد يعمل الآن</p></div>
+              ) : (
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))', gap:12 }}>
+                  {workingNow.map((emp, i) => {
+                    const [bg, fg] = AVATAR_COLORS[i % AVATAR_COLORS.length]
+                    const entry = openEntriesMap[emp.id]
+                    const elapsed = getElapsed(entry.check_in)
+                    const todayMins = todayMinsByEmp[emp.id] || 0
+                    return (
+                      <div key={emp.id} style={{ background:'#f0fdf8', border:'1.5px solid #9fe1cb', borderRadius:12, padding:'1rem', display:'flex', flexDirection:'column', gap:8 }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                          <div style={{ position:'relative' }}>
+                            <div className="avatar" style={{ background:bg, color:fg, width:44, height:44, fontSize:'1rem' }}>{getInitials(emp.name)}</div>
+                            <span style={{ position:'absolute', bottom:0, left:0, width:12, height:12, background:'#1d9e75', borderRadius:'50%', border:'2px solid white' }} />
+                          </div>
+                          <div>
+                            <div style={{ fontWeight:700, fontSize:'0.95rem', color:'#085041' }}>{emp.name}</div>
+                            <div style={{ fontSize:'0.78rem', color:'#1d9e75' }}>دخل الساعة {entry.check_in?.slice(0,5)}</div>
+                          </div>
+                        </div>
+                        <div style={{ display:'flex', gap:8 }}>
+                          <div style={{ flex:1, background:'white', borderRadius:8, padding:'0.5rem', textAlign:'center' }}>
+                            <div style={{ fontWeight:700, fontSize:'1.1rem', color:'#085041' }}>{elapsed}</div>
+                            <div style={{ fontSize:'0.72rem', color:'#9ca3af' }}>هذه الجلسة</div>
+                          </div>
+                          <div style={{ flex:1, background:'white', borderRadius:8, padding:'0.5rem', textAlign:'center' }}>
+                            <div style={{ fontWeight:700, fontSize:'1.1rem', color:'#374151' }}>{fmtHours(todayMins + 0)}</div>
+                            <div style={{ fontSize:'0.72rem', color:'#9ca3af' }}>مجموع اليوم</div>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Not working */}
+            <div className="card">
+              <div className="card-title">😴 خارج العمل الآن ({notWorking.length})</div>
+              {notWorking.length === 0 ? (
+                <div className="empty"><p>الجميع يعمل! 🎉</p></div>
+              ) : (
+                <table className="emp-table">
+                  <thead><tr><th>الموظفة</th><th>ساعات اليوم</th><th>آخر خروج</th><th>الحالة</th></tr></thead>
+                  <tbody>
+                    {notWorking.map((emp, i) => {
+                      const [bg, fg] = AVATAR_COLORS[(employees.indexOf(emp)) % AVATAR_COLORS.length]
+                      const todayMins = todayMinsByEmp[emp.id] || 0
+                      const lastEntry = todayEntries.filter(e => e.employee_id === emp.id && e.check_out).sort((a,b) => b.check_out?.localeCompare(a.check_out))[0]
+                      const hasWorkedToday = todayEntries.some(e => e.employee_id === emp.id)
+                      return (
+                        <tr key={emp.id}>
+                          <td><div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                            <div className="avatar" style={{ background:bg, color:fg }}>{getInitials(emp.name)}</div>
+                            {emp.name}
+                          </div></td>
+                          <td>{todayMins > 0 ? <strong>{fmtHours(todayMins)}</strong> : '—'}</td>
+                          <td>{lastEntry ? lastEntry.check_out?.slice(0,5) : '—'}</td>
+                          <td>
+                            {hasWorkedToday
+                              ? <span className="badge badge-amber">انصرفت</span>
+                              : <span className="badge badge-red">لم تحضر</span>
+                            }
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── DAILY TAB ── */}
         {tab === 'daily' && (
           <div>
             <div className="card">
@@ -212,70 +327,55 @@ export default function AdminDashboard() {
               <div className="table-wrap">
                 <table>
                   <thead>
-                    <tr><th>الموظفة</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>الحالة</th><th></th></tr>
+                    <tr><th>الموظفة</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>الجلسات</th><th>الحالة</th><th></th></tr>
                   </thead>
                   <tbody>
                     {employees.map((emp, i) => {
-                      const empEntries = dailyEntries.filter(e => e.employee_id === emp.id)
+                      const selEntries = entries.filter(e => e.date === selectedDate && e.employee_id === emp.id)
                       const [bg, fg] = AVATAR_COLORS[i % AVATAR_COLORS.length]
-                      if (!empEntries.length) return (
+                      if (!selEntries.length) return (
                         <tr key={emp.id}>
-                          <td><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <div className="avatar" style={{ background: bg, color: fg }}>{getInitials(emp.name)}</div>
-                            {emp.name}
+                          <td><div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                            <div className="avatar" style={{ background:bg, color:fg }}>{getInitials(emp.name)}</div>{emp.name}
                           </div></td>
-                          <td>—</td><td>—</td><td>—</td>
+                          <td>—</td><td>—</td><td>—</td><td>—</td>
                           <td><span className="badge badge-red">غائبة</span></td>
                           <td></td>
                         </tr>
                       )
-                      const totalM = empEntries.reduce((s, e) => s + (e.minutes || 0), 0)
-                      return empEntries.map((e, j) => (
-                        <tr key={e.id}>
-                          {j === 0 && (
-                            <td rowSpan={empEntries.length}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <div className="avatar" style={{ background: bg, color: fg }}>{getInitials(emp.name)}</div>
-                                {emp.name}
-                              </div>
-                            </td>
-                          )}
-                          <td>{e.check_in?.slice(0, 5)}</td>
-                          <td>{e.check_out ? e.check_out.slice(0, 5) : <span className="badge badge-amber">لم يغادر</span>}</td>
-                          {j === 0 && (
-                            <>
-                              <td rowSpan={empEntries.length}><strong>{fmtHours(totalM)}</strong></td>
-                              <td rowSpan={empEntries.length}>
-                                <span className={`badge ${totalM >= 480 ? 'badge-green' : totalM >= 360 ? 'badge-amber' : 'badge-red'}`}>
-                                  {totalM >= 480 ? 'مكتمل' : totalM >= 360 ? 'جزئي' : 'قصير'}
-                                </span>
-                              </td>
-                            </>
-                          )}
-                          <td>
-                            <button className="btn btn-danger" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
-                              onClick={() => deleteEntry(e.id)}>حذف</button>
-                          </td>
+                      const totalM = selEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+                      const sessions = selEntries.filter(e => e.check_out).length
+                      return (
+                        <tr key={emp.id}>
+                          <td><div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                            <div className="avatar" style={{ background:bg, color:fg }}>{getInitials(emp.name)}</div>{emp.name}
+                          </div></td>
+                          <td>{selEntries[selEntries.length-1]?.check_in?.slice(0,5)}</td>
+                          <td>{selEntries[0]?.check_out ? selEntries[0].check_out.slice(0,5) : <span className="badge badge-amber">مسجّل دخول</span>}</td>
+                          <td><strong>{fmtHours(totalM)}</strong></td>
+                          <td>{sessions} جلسة</td>
+                          <td><span className={`badge ${totalM>=480?'badge-green':totalM>=360?'badge-amber':'badge-red'}`}>
+                            {totalM>=480?'مكتمل':totalM>=360?'جزئي':'قصير'}
+                          </span></td>
+                          <td><button className="btn btn-danger" style={{ padding:'0.3rem 0.6rem', fontSize:'0.75rem' }}
+                            onClick={() => { if(confirm('حذف جميع سجلات هذا اليوم؟')) selEntries.forEach(e => deleteEntry(e.id)) }}>حذف</button></td>
                         </tr>
-                      ))
+                      )
                     })}
                   </tbody>
                 </table>
-                {employees.length === 0 && <div className="empty"><div className="empty-icon">👥</div><p>لا توجد موظفات. أضف موظفة من تبويب الموظفات.</p></div>}
               </div>
             </div>
           </div>
         )}
 
-        {/* WEEKLY TAB */}
+        {/* ── WEEKLY TAB ── */}
         {tab === 'weekly' && (
           <div className="card">
             <div className="card-title">📆 التقرير الأسبوعي ({wStart} → {wEnd})</div>
             <div className="table-wrap">
               <table>
-                <thead>
-                  <tr><th>الموظفة</th><th>أيام العمل</th><th>إجمالي الساعات</th><th>المستهدف</th><th>نسبة الإنجاز</th></tr>
-                </thead>
+                <thead><tr><th>الموظفة</th><th>أيام العمل</th><th>إجمالي الساعات</th><th>المستهدف</th><th>نسبة الإنجاز</th></tr></thead>
                 <tbody>
                   {employees.map((emp, i) => {
                     const { mins, days } = empHoursInRange(emp.id, weekEntries)
@@ -284,41 +384,32 @@ export default function AdminDashboard() {
                     const [bg, fg] = AVATAR_COLORS[i % AVATAR_COLORS.length]
                     return (
                       <tr key={emp.id}>
-                        <td><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <div className="avatar" style={{ background: bg, color: fg }}>{getInitials(emp.name)}</div>
-                          {emp.name}
+                        <td><div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                          <div className="avatar" style={{ background:bg, color:fg }}>{getInitials(emp.name)}</div>{emp.name}
                         </div></td>
                         <td>{days} أيام</td>
-                        <td><strong>{fmtHours(mins)}</strong> ساعة</td>
+                        <td><strong>{fmtHours(mins)}</strong> / {emp.weekly_hours}س</td>
                         <td>{emp.weekly_hours} ساعة</td>
-                        <td style={{ minWidth: 140 }}>
-                          <div style={{ fontSize: '0.78rem', color: '#9ca3af', marginBottom: 4 }}>{pct}%</div>
-                          <div className="progress-bar">
-                            <div className="progress-fill" style={{
-                              width: pct + '%',
-                              background: pct >= 100 ? '#1d9e75' : pct >= 70 ? '#ba7517' : '#e24b4a'
-                            }} />
-                          </div>
+                        <td style={{ minWidth:140 }}>
+                          <div style={{ fontSize:'0.78rem', color:'#9ca3af', marginBottom:4 }}>{pct}%</div>
+                          <div className="progress-bar"><div className="progress-fill" style={{ width:pct+'%', background:pct>=100?'#1d9e75':pct>=70?'#ba7517':'#e24b4a' }} /></div>
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-              {employees.length === 0 && <div className="empty"><div className="empty-icon">📊</div><p>لا توجد بيانات</p></div>}
             </div>
           </div>
         )}
 
-        {/* MONTHLY TAB */}
+        {/* ── MONTHLY TAB ── */}
         {tab === 'monthly' && (
           <div className="card">
             <div className="card-title">🗓️ التقرير الشهري ({mStart} → {mEnd})</div>
             <div className="table-wrap">
               <table>
-                <thead>
-                  <tr><th>الموظفة</th><th>أيام العمل</th><th>إجمالي الساعات</th><th>متوسط يومي</th><th>الحالة</th></tr>
-                </thead>
+                <thead><tr><th>الموظفة</th><th>أيام العمل</th><th>إجمالي الساعات</th><th>متوسط يومي</th><th>الحالة</th></tr></thead>
                 <tbody>
                   {employees.map((emp, i) => {
                     const { mins, days } = empHoursInRange(emp.id, monthEntries)
@@ -326,18 +417,15 @@ export default function AdminDashboard() {
                     const [bg, fg] = AVATAR_COLORS[i % AVATAR_COLORS.length]
                     return (
                       <tr key={emp.id}>
-                        <td><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <div className="avatar" style={{ background: bg, color: fg }}>{getInitials(emp.name)}</div>
-                          {emp.name}
+                        <td><div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                          <div className="avatar" style={{ background:bg, color:fg }}>{getInitials(emp.name)}</div>{emp.name}
                         </div></td>
                         <td>{days} أيام</td>
                         <td><strong>{fmtHours(mins)}</strong></td>
                         <td>{fmtHours(avgMins)}</td>
-                        <td>
-                          <span className={`badge ${days >= 20 ? 'badge-green' : days >= 10 ? 'badge-amber' : days === 0 ? 'badge-red' : 'badge-gray'}`}>
-                            {days >= 20 ? 'منتظمة' : days >= 10 ? 'متوسطة' : days === 0 ? 'غائبة' : 'قليلة'}
-                          </span>
-                        </td>
+                        <td><span className={`badge ${days>=20?'badge-green':days>=10?'badge-amber':days===0?'badge-red':'badge-gray'}`}>
+                          {days>=20?'منتظمة':days>=10?'متوسطة':days===0?'غائبة':'قليلة'}
+                        </span></td>
                       </tr>
                     )
                   })}
@@ -347,7 +435,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* MANUAL ENTRY TAB */}
+        {/* ── MANUAL ENTRY TAB ── */}
         {tab === 'manual' && (
           <div className="card">
             <div className="card-title">✏️ إدخال يدوي</div>
@@ -374,9 +462,8 @@ export default function AdminDashboard() {
             <button className="btn btn-primary" onClick={addManualEntry} disabled={addingEntry}>
               {addingEntry ? '⏳ جارٍ الحفظ...' : '+ إضافة سجل'}
             </button>
-
-            <div style={{ marginTop: '1.5rem', borderTop: '1px solid #f3f4f6', paddingTop: '1rem' }}>
-              <div style={{ fontWeight: 600, marginBottom: '0.75rem', fontSize: '0.9rem' }}>آخر السجلات</div>
+            <div style={{ marginTop:'1.5rem', borderTop:'1px solid #f3f4f6', paddingTop:'1rem' }}>
+              <div style={{ fontWeight:600, marginBottom:'0.75rem', fontSize:'0.9rem' }}>آخر السجلات</div>
               <div className="table-wrap">
                 <table>
                   <thead><tr><th>الموظفة</th><th>التاريخ</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th></th></tr></thead>
@@ -388,18 +475,17 @@ export default function AdminDashboard() {
                         <td>{e.check_in?.slice(0, 5)}</td>
                         <td>{e.check_out?.slice(0, 5) || '—'}</td>
                         <td>{fmtHours(e.minutes)}</td>
-                        <td><button className="btn btn-danger" style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }} onClick={() => deleteEntry(e.id)}>حذف</button></td>
+                        <td><button className="btn btn-danger" style={{ padding:'0.25rem 0.6rem', fontSize:'0.75rem' }} onClick={() => deleteEntry(e.id)}>حذف</button></td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                {entries.length === 0 && <div className="empty"><p>لا توجد سجلات</p></div>}
               </div>
             </div>
           </div>
         )}
 
-        {/* EMPLOYEES TAB */}
+        {/* ── EMPLOYEES TAB ── */}
         {tab === 'employees' && (
           <div>
             <div className="card">
@@ -408,20 +494,17 @@ export default function AdminDashboard() {
                 <div className="form-group">
                   <label className="form-label">الاسم</label>
                   <input type="text" className="form-input" placeholder="اسم الموظفة" value={newName}
-                    onChange={e => setNewName(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && addEmployee()} />
+                    onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key==='Enter' && addEmployee()} />
                 </div>
                 <div className="form-group">
                   <label className="form-label">ساعات العمل المطلوبة أسبوعياً</label>
-                  <input type="number" className="form-input" min="1" max="60" value={newHours}
-                    onChange={e => setNewHours(+e.target.value)} />
+                  <input type="number" className="form-input" min="1" max="60" value={newHours} onChange={e => setNewHours(+e.target.value)} />
                 </div>
               </div>
               <button className="btn btn-primary" onClick={addEmployee} disabled={addingEmp}>
-                {addingEmp ? '⏳ جارٍ الإضافة...' : '+ إضافة موظفة'}
+                {addingEmp ? '⏳...' : '+ إضافة موظفة'}
               </button>
             </div>
-
             <div className="card">
               <div className="card-title">👥 قائمة الموظفات</div>
               <div className="table-wrap">
@@ -430,37 +513,29 @@ export default function AdminDashboard() {
                   <tbody>
                     {employees.map((emp, i) => {
                       const [bg, fg] = AVATAR_COLORS[i % AVATAR_COLORS.length]
-                      const link = typeof window !== 'undefined'
-                        ? `${window.location.origin}/checkin/${emp.id}`
-                        : `/checkin/${emp.id}`
+                      const link = typeof window !== 'undefined' ? `${window.location.origin}/checkin/${emp.id}` : `/checkin/${emp.id}`
                       return (
                         <tr key={emp.id}>
-                          <td><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <div className="avatar" style={{ background: bg, color: fg }}>{getInitials(emp.name)}</div>
-                            {emp.name}
+                          <td><div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                            <div className="avatar" style={{ background:bg, color:fg }}>{getInitials(emp.name)}</div>{emp.name}
                           </div></td>
                           <td>{emp.weekly_hours} ساعة</td>
                           <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <code style={{ fontSize: '0.75rem', background: '#f3f4f6', padding: '2px 8px', borderRadius: 6, direction: 'ltr', display: 'block', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                              <code style={{ fontSize:'0.75rem', background:'#f3f4f6', padding:'2px 8px', borderRadius:6, direction:'ltr', display:'block', maxWidth:280, overflow:'hidden', textOverflow:'ellipsis' }}>
                                 /checkin/{emp.id}
                               </code>
-                              <button className="btn btn-outline" style={{ padding: '0.3rem 0.7rem', fontSize: '0.75rem' }}
-                                onClick={() => { navigator.clipboard.writeText(link); showMsg('تم نسخ الرابط ✓') }}>
-                                نسخ
-                              </button>
+                              <button className="btn btn-outline" style={{ padding:'0.3rem 0.7rem', fontSize:'0.75rem' }}
+                                onClick={() => { navigator.clipboard.writeText(link); showMsg('تم نسخ الرابط ✓') }}>نسخ</button>
                             </div>
                           </td>
-                          <td>
-                            <button className="btn btn-danger" style={{ padding: '0.3rem 0.7rem', fontSize: '0.75rem' }}
-                              onClick={() => deleteEmployee(emp.id)}>حذف</button>
-                          </td>
+                          <td><button className="btn btn-danger" style={{ padding:'0.3rem 0.7rem', fontSize:'0.75rem' }} onClick={() => deleteEmployee(emp.id)}>حذف</button></td>
                         </tr>
                       )
                     })}
                   </tbody>
                 </table>
-                {employees.length === 0 && <div className="empty"><div className="empty-icon">👥</div><p>لا توجد موظفات حتى الآن</p></div>}
+                {employees.length === 0 && <div className="empty"><div className="empty-icon">👥</div><p>لا توجد موظفات</p></div>}
               </div>
             </div>
           </div>
