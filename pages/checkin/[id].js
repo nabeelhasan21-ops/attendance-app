@@ -1,17 +1,42 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/router'
 import { supabase } from '../../lib/supabase'
 import Head from 'next/head'
 
+const TIMEZONE = 'Asia/Amman'
+
+function nowJO() {
+  // Returns current time in Jordan timezone
+  return new Date(new Date().toLocaleString('en-US', { timeZone: TIMEZONE }))
+}
+
+function todayStrJO() {
+  const d = nowJO()
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+}
+
+function timeStrJO() {
+  const d = nowJO()
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
+}
+
 function fmtHours(minutes) {
-  if (!minutes) return '0:00'
+  if (!minutes || minutes <= 0) return '0:00'
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
   return `${h}:${String(m).padStart(2, '0')}`
 }
 
-function todayStr() {
-  return new Date().toISOString().split('T')[0]
+function timeToMins(t) {
+  if (!t) return 0
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+function getElapsedMins(checkInTime) {
+  const inMins = timeToMins(checkInTime)
+  const nowMins = timeToMins(timeStrJO())
+  return Math.max(0, nowMins - inMins)
 }
 
 function getArabicDay(dateStr) {
@@ -21,20 +46,19 @@ function getArabicDay(dateStr) {
 
 function getArabicDate(dateStr) {
   const [y, m, d] = dateStr.split('-')
-  const months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر']
-  return `${parseInt(d)} ${months[parseInt(m) - 1]} ${y}`
+  const months = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر']
+  return `${parseInt(d)} ${months[parseInt(m)-1]} ${y}`
 }
 
 function weekStartStr() {
-  const now = new Date()
-  const start = new Date(now)
-  start.setDate(now.getDate() - now.getDay())
-  return start.toISOString().split('T')[0]
+  const d = nowJO()
+  d.setDate(d.getDate() - d.getDay())
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 }
 
 function monthStartStr() {
-  const now = new Date()
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+  const d = nowJO()
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`
 }
 
 export default function CheckIn() {
@@ -45,22 +69,35 @@ export default function CheckIn() {
   const [openEntry, setOpenEntry] = useState(null)
   const [allEntries, setAllEntries] = useState([])
   const [loading, setLoading] = useState(true)
-  const [time, setTime] = useState('')
-  const [dateStr, setDateStr] = useState('')
+  const [displayTime, setDisplayTime] = useState('')
+  const [displayDate, setDisplayDate] = useState('')
   const [msg, setMsg] = useState(null)
   const [working, setWorking] = useState(false)
   const [summaryMode, setSummaryMode] = useState('week')
+  const [elapsedMins, setElapsedMins] = useState(0)
+  const tickRef = useRef(null)
 
+  // Clock tick every second
   useEffect(() => {
     const tick = () => {
-      const now = new Date()
-      setTime(now.toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }))
-      setDateStr(now.toISOString().split('T')[0])
+      const d = nowJO()
+      setDisplayTime(`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`)
+      setDisplayDate(todayStrJO())
     }
     tick()
-    const interval = setInterval(tick, 1000)
-    return () => clearInterval(interval)
+    tickRef.current = setInterval(tick, 1000)
+    return () => clearInterval(tickRef.current)
   }, [])
+
+  // Update elapsed time every second when checked in
+  useEffect(() => {
+    if (!openEntry) { setElapsedMins(0); return }
+    const iv = setInterval(() => {
+      setElapsedMins(getElapsedMins(openEntry.check_in))
+    }, 1000)
+    setElapsedMins(getElapsedMins(openEntry.check_in))
+    return () => clearInterval(iv)
+  }, [openEntry])
 
   useEffect(() => {
     if (!id) return
@@ -77,9 +114,7 @@ export default function CheckIn() {
     const sinceStr = since.toISOString().split('T')[0]
 
     const { data: entries } = await supabase
-      .from('entries')
-      .select('*')
-      .eq('employee_id', id)
+      .from('entries').select('*').eq('employee_id', id)
       .gte('date', sinceStr)
       .order('date', { ascending: false })
       .order('created_at', { ascending: false })
@@ -98,10 +133,11 @@ export default function CheckIn() {
   async function handleCheckIn() {
     if (openEntry) { showMsg('أنت مسجّل دخول بالفعل. سجّل خروجك أولاً.', 'error'); return }
     setWorking(true)
-    const now = new Date()
-    const timeStr = now.toTimeString().slice(0, 8)
-    const today = now.toISOString().split('T')[0]
-    const { error } = await supabase.from('entries').insert({ employee_id: id, date: today, check_in: timeStr, minutes: 0 })
+    const t = timeStrJO()
+    const d = todayStrJO()
+    const { error } = await supabase.from('entries').insert({
+      employee_id: id, date: d, check_in: t, minutes: 0
+    })
     if (error) showMsg('حدث خطأ: ' + error.message, 'error')
     else { showMsg('✅ تم تسجيل الدخول'); loadData() }
     setWorking(false)
@@ -110,41 +146,47 @@ export default function CheckIn() {
   async function handleCheckOut() {
     if (!openEntry) return
     setWorking(true)
-    const now = new Date()
-    const timeStr = now.toTimeString().slice(0, 8)
-    const [ih, im] = openEntry.check_in.split(':').map(Number)
-    const [oh, om] = timeStr.split(':').map(Number)
-    const minutes = Math.max(0, (oh * 60 + om) - (ih * 60 + im))
-    const { error } = await supabase.from('entries').update({ check_out: timeStr, minutes }).eq('id', openEntry.id)
+    const t = timeStrJO()
+    const inMins = timeToMins(openEntry.check_in)
+    const outMins = timeToMins(t)
+    const minutes = Math.max(0, outMins - inMins)
+    const { error } = await supabase.from('entries').update({ check_out: t, minutes }).eq('id', openEntry.id)
     if (error) showMsg('حدث خطأ: ' + error.message, 'error')
     else { showMsg(`🔴 تم تسجيل الخروج — ${fmtHours(minutes)} في هذه الجلسة`); loadData() }
     setWorking(false)
   }
 
-  const today = todayStr()
+  // ── Totals ──
+  const today = todayStrJO()
   const wStart = weekStartStr()
   const mStart = monthStartStr()
 
   const todayEntries = allEntries.filter(e => e.date === today)
-  const todayMins = todayEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+  // Today mins = completed sessions + current running session
+  const todayCompletedMins = todayEntries.filter(e => e.check_out).reduce((s, e) => s + (e.minutes || 0), 0)
+  const todayTotalMins = todayCompletedMins + (openEntry && openEntry.date === today ? elapsedMins : 0)
 
-  const weekMins = allEntries.filter(e => e.date >= wStart).reduce((s, e) => s + (e.minutes || 0), 0)
-  const weekDays = new Set(allEntries.filter(e => e.date >= wStart).map(e => e.date)).size
+  const weekEntries = allEntries.filter(e => e.date >= wStart)
+  const weekCompletedMins = weekEntries.filter(e => e.check_out).reduce((s, e) => s + (e.minutes || 0), 0)
+  const weekTotalMins = weekCompletedMins + (openEntry ? elapsedMins : 0)
+  const weekDays = new Set(weekEntries.map(e => e.date)).size
 
-  const monthMins = allEntries.filter(e => e.date >= mStart).reduce((s, e) => s + (e.minutes || 0), 0)
-  const monthDays = new Set(allEntries.filter(e => e.date >= mStart).map(e => e.date)).size
+  const monthEntries = allEntries.filter(e => e.date >= mStart)
+  const monthCompletedMins = monthEntries.filter(e => e.check_out).reduce((s, e) => s + (e.minutes || 0), 0)
+  const monthTotalMins = monthCompletedMins + (openEntry ? elapsedMins : 0)
+  const monthDays = new Set(monthEntries.map(e => e.date)).size
 
   if (loading) return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: '2rem' }}>⏳</div>
-      <div style={{ color: '#9ca3af' }}>جارٍ التحميل...</div>
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', minHeight:'100vh', flexDirection:'column', gap:12 }}>
+      <div style={{ fontSize:'2rem' }}>⏳</div>
+      <div style={{ color:'#9ca3af' }}>جارٍ التحميل...</div>
     </div>
   )
 
   if (!employee) return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: '3rem' }}>❌</div>
-      <div style={{ color: '#e24b4a', fontWeight: 600 }}>لم يتم العثور على الموظف</div>
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', minHeight:'100vh', flexDirection:'column', gap:12 }}>
+      <div style={{ fontSize:'3rem' }}>❌</div>
+      <div style={{ color:'#e24b4a', fontWeight:600 }}>لم يتم العثور على الموظف</div>
     </div>
   )
 
@@ -162,106 +204,133 @@ export default function CheckIn() {
         </div>
       </header>
 
-      <div className="container" style={{ paddingTop: '1.5rem', paddingBottom: '3rem' }}>
+      <div className="container" style={{ paddingTop:'1.5rem', paddingBottom:'3rem' }}>
         {msg && <div className={`alert alert-${msg.type}`}>{msg.text}</div>}
 
-        {/* Clock + Action */}
+        {/* Clock */}
         <div className="card checkin-card">
           <div className="clock-display">
-            <div className="clock-time">{time}</div>
-            <div className="clock-date">{dateStr ? `${getArabicDay(dateStr)}، ${getArabicDate(dateStr)}` : ''}</div>
+            <div className="clock-time">{displayTime}</div>
+            <div className="clock-date">{displayDate ? `${getArabicDay(displayDate)}، ${getArabicDate(displayDate)}` : ''}</div>
           </div>
 
-          {/* Status */}
+          {/* Status bar */}
           <div style={{
-            textAlign: 'center', padding: '0.85rem 1rem',
+            textAlign:'center', padding:'0.85rem 1rem',
             background: openEntry ? '#e1f5ee' : '#f9fafb',
-            borderRadius: 10, marginBottom: '1.25rem',
-            border: `1px solid ${openEntry ? '#9fe1cb' : '#e5e7eb'}`
+            borderRadius:10, marginBottom:'1.25rem',
+            border:`1px solid ${openEntry ? '#9fe1cb' : '#e5e7eb'}`
           }}>
-            {openEntry
-              ? <div style={{ fontWeight: 700, color: '#085041' }}>✅ مسجّل دخول منذ {openEntry.check_in?.slice(0, 5)}</div>
-              : <div style={{ color: '#6b7280' }}>⏸ غير مسجّل حالياً</div>
-            }
-            {todayMins > 0 && (
-              <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: 4 }}>
-                إجمالي اليوم حتى الآن: <strong>{fmtHours(todayMins)}</strong> ساعة ({todayEntries.filter(e=>e.check_out).length} جلسة)
+            {openEntry ? (
+              <>
+                <div style={{ fontWeight:700, color:'#085041' }}>✅ مسجّل دخول منذ {openEntry.check_in?.slice(0,5)}</div>
+                <div style={{ fontSize:'1.4rem', fontWeight:700, color:'#1d9e75', marginTop:4, fontVariantNumeric:'tabular-nums' }}>
+                  ⏱ {fmtHours(elapsedMins)} هذه الجلسة
+                </div>
+              </>
+            ) : (
+              <div style={{ color:'#6b7280' }}>⏸ غير مسجّل حالياً</div>
+            )}
+            {todayCompletedMins > 0 && (
+              <div style={{ fontSize:'0.82rem', color:'#6b7280', marginTop:4 }}>
+                جلسات مكتملة اليوم: <strong>{fmtHours(todayCompletedMins)}</strong>
+                {openEntry ? ` + جلسة جارية` : ''}
               </div>
             )}
           </div>
 
-          {/* Buttons - both always visible */}
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button
-              className="btn btn-primary btn-lg"
-              onClick={handleCheckIn}
-              disabled={working || !!openEntry}
-              style={{ flex: 1, opacity: openEntry ? 0.4 : 1 }}
-            >
+          {/* Total today live counter */}
+          {(openEntry || todayCompletedMins > 0) && (
+            <div style={{ background:'#085041', color:'white', borderRadius:10, padding:'0.75rem', textAlign:'center', marginBottom:'1rem' }}>
+              <div style={{ fontSize:'0.78rem', opacity:0.8, marginBottom:2 }}>إجمالي اليوم (يتحدث تلقائياً)</div>
+              <div style={{ fontSize:'2rem', fontWeight:700, fontVariantNumeric:'tabular-nums' }}>{fmtHours(todayTotalMins)}</div>
+            </div>
+          )}
+
+          {/* Buttons */}
+          <div style={{ display:'flex', gap:10 }}>
+            <button className="btn btn-primary btn-lg" onClick={handleCheckIn}
+              disabled={working || !!openEntry} style={{ flex:1, opacity:openEntry?0.4:1 }}>
               🟢 تسجيل دخول
             </button>
-            <button
-              className="btn btn-lg"
-              onClick={handleCheckOut}
+            <button className="btn btn-lg" onClick={handleCheckOut}
               disabled={working || !openEntry}
-              style={{ flex: 1, background: openEntry ? '#e24b4a' : '#f3f4f6', color: openEntry ? 'white' : '#9ca3af', justifyContent: 'center', opacity: !openEntry ? 0.5 : 1 }}
-            >
+              style={{ flex:1, background:openEntry?'#e24b4a':'#f3f4f6', color:openEntry?'white':'#9ca3af', justifyContent:'center', opacity:!openEntry?0.5:1 }}>
               🔴 تسجيل خروج
             </button>
           </div>
 
-          {/* Today's sessions */}
+          {/* Today sessions list */}
           {todayEntries.length > 0 && (
-            <div style={{ marginTop: '1.25rem', borderTop: '1px solid #f3f4f6', paddingTop: '1rem' }}>
-              <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#6b7280', marginBottom: '0.6rem' }}>📍 جلسات اليوم</div>
+            <div style={{ marginTop:'1.25rem', borderTop:'1px solid #f3f4f6', paddingTop:'1rem' }}>
+              <div style={{ fontSize:'0.82rem', fontWeight:600, color:'#6b7280', marginBottom:'0.6rem' }}>📍 جلسات اليوم</div>
               {todayEntries.slice().reverse().map((e, i) => (
-                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.4rem 0.6rem', background: '#f9fafb', borderRadius: 6, marginBottom: 4 }}>
-                  <span style={{ fontSize: '0.85rem', color: '#374151' }}>
-                    جلسة {i + 1}: {e.check_in?.slice(0, 5)} ← {e.check_out ? e.check_out.slice(0, 5) : '...'}
+                <div key={e.id} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'0.4rem 0.6rem', background:'#f9fafb', borderRadius:6, marginBottom:4 }}>
+                  <span style={{ fontSize:'0.85rem', color:'#374151' }}>
+                    جلسة {i+1}: {e.check_in?.slice(0,5)} ← {e.check_out ? e.check_out.slice(0,5) : '...'}
                   </span>
                   {e.check_out
                     ? <span className="badge badge-green">{fmtHours(e.minutes)}</span>
-                    : <span className="badge badge-amber">جارية</span>
+                    : <span className="badge badge-amber" style={{ fontVariantNumeric:'tabular-nums' }}>{fmtHours(elapsedMins)} ⏱</span>
                   }
                 </div>
               ))}
-              <div style={{ marginTop: '0.5rem', textAlign: 'left', fontWeight: 700, fontSize: '0.9rem', color: '#085041' }}>
-                مجموع اليوم: {fmtHours(todayMins)}
+              <div style={{ marginTop:'0.5rem', display:'flex', justifyContent:'space-between', fontWeight:700, fontSize:'0.9rem', color:'#085041', padding:'0.4rem 0.6rem', background:'#e1f5ee', borderRadius:6 }}>
+                <span>مجموع اليوم:</span>
+                <span>{fmtHours(todayTotalMins)}</span>
               </div>
             </div>
           )}
         </div>
 
-        {/* Summary */}
-        <div className="card" style={{ maxWidth: 480, margin: '0 auto 1.25rem' }}>
-          <div className="card-title">📊 ملخص ساعاتي</div>
-          <div className="tabs" style={{ marginBottom: '1rem' }}>
+        {/* Summary tabs */}
+        <div className="card" style={{ maxWidth:480, margin:'0 auto 1.25rem' }}>
+          <div className="card-title">📊 ملخص ساعاتي التراكمي</div>
+          <div className="tabs" style={{ marginBottom:'1rem' }}>
             {[['today','اليوم'],['week','الأسبوع'],['month','الشهر']].map(([k,l]) => (
               <button key={k} className={`tab-btn ${summaryMode===k?'active':''}`} onClick={() => setSummaryMode(k)}>{l}</button>
             ))}
           </div>
           {summaryMode === 'today' && (
             <div className="stats-grid">
-              <div className="stat-card"><div className="stat-value">{fmtHours(todayMins)}</div><div className="stat-label">ساعات اليوم</div></div>
-              <div className="stat-card"><div className="stat-value">{todayEntries.filter(e=>e.check_out).length}</div><div className="stat-label">جلسات مكتملة</div></div>
+              <div className="stat-card">
+                <div className="stat-value" style={{ fontVariantNumeric:'tabular-nums' }}>{fmtHours(todayTotalMins)}</div>
+                <div className="stat-label">إجمالي اليوم</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">{todayEntries.length}</div>
+                <div className="stat-label">عدد الجلسات</div>
+              </div>
             </div>
           )}
           {summaryMode === 'week' && (
             <div className="stats-grid">
-              <div className="stat-card"><div className="stat-value">{fmtHours(weekMins)}</div><div className="stat-label">ساعات الأسبوع</div></div>
-              <div className="stat-card"><div className="stat-value">{weekDays}</div><div className="stat-label">أيام العمل</div></div>
+              <div className="stat-card">
+                <div className="stat-value" style={{ fontVariantNumeric:'tabular-nums' }}>{fmtHours(weekTotalMins)}</div>
+                <div className="stat-label">إجمالي الأسبوع</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">{weekDays}</div>
+                <div className="stat-label">أيام العمل</div>
+              </div>
             </div>
           )}
           {summaryMode === 'month' && (
             <div className="stats-grid">
-              <div className="stat-card"><div className="stat-value">{fmtHours(monthMins)}</div><div className="stat-label">ساعات الشهر</div></div>
-              <div className="stat-card"><div className="stat-value">{monthDays}</div><div className="stat-label">أيام العمل</div></div>
+              <div className="stat-card">
+                <div className="stat-value" style={{ fontVariantNumeric:'tabular-nums' }}>{fmtHours(monthTotalMins)}</div>
+                <div className="stat-label">إجمالي الشهر</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">{monthDays}</div>
+                <div className="stat-label">أيام العمل</div>
+              </div>
             </div>
           )}
         </div>
 
-        {/* History grouped by day */}
-        <div className="card" style={{ maxWidth: 480, margin: '0 auto' }}>
+        {/* History */}
+        <div className="card" style={{ maxWidth:480, margin:'0 auto' }}>
           <div className="card-title">📋 السجل التفصيلي</div>
           {(() => {
             const grouped = {}
@@ -273,19 +342,26 @@ export default function CheckIn() {
             if (!dates.length) return <div className="empty"><p>لا توجد سجلات</p></div>
             return dates.map(d => {
               const dayEntries = grouped[d]
-              const dayMins = dayEntries.reduce((s, e) => s + (e.minutes || 0), 0)
+              const completedMins = dayEntries.filter(e=>e.check_out).reduce((s,e)=>s+(e.minutes||0),0)
+              const isToday = d === today
+              const totalMins = isToday ? todayTotalMins : completedMins
               return (
-                <div key={d} style={{ marginBottom: '1rem', paddingBottom: '1rem', borderBottom: '1px solid #f3f4f6' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                    <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>{getArabicDay(d)} {getArabicDate(d)}</span>
-                    <span className={`badge ${dayMins >= 480 ? 'badge-green' : dayMins >= 240 ? 'badge-amber' : 'badge-gray'}`}>{fmtHours(dayMins)}</span>
+                <div key={d} style={{ marginBottom:'1rem', paddingBottom:'1rem', borderBottom:'1px solid #f3f4f6' }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'0.4rem' }}>
+                    <span style={{ fontWeight:600, fontSize:'0.85rem' }}>{getArabicDay(d)} {getArabicDate(d)}</span>
+                    <span className={`badge ${totalMins>=480?'badge-green':totalMins>=240?'badge-amber':'badge-gray'}`}>
+                      {fmtHours(totalMins)}{isToday && openEntry ? ' ⏱' : ''}
+                    </span>
                   </div>
                   {dayEntries.slice().reverse().map((e, i) => (
-                    <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#6b7280', padding: '0.25rem 0.5rem', background: '#f9fafb', borderRadius: 5, marginBottom: 2 }}>
+                    <div key={e.id} style={{ display:'flex', justifyContent:'space-between', fontSize:'0.8rem', color:'#6b7280', padding:'0.25rem 0.5rem', background:'#f9fafb', borderRadius:5, marginBottom:2 }}>
                       <span>جلسة {i+1}: {e.check_in?.slice(0,5)} ← {e.check_out ? e.check_out.slice(0,5) : '...'}</span>
-                      <span>{e.check_out ? fmtHours(e.minutes) : <span style={{color:'#ba7517'}}>جارية</span>}</span>
+                      <span>{e.check_out ? fmtHours(e.minutes) : <span style={{color:'#1d9e75', fontWeight:600}}>{fmtHours(elapsedMins)} ⏱</span>}</span>
                     </div>
                   ))}
+                  <div style={{ display:'flex', justifyContent:'space-between', fontSize:'0.82rem', fontWeight:700, color:'#085041', padding:'0.3rem 0.5rem' }}>
+                    <span>المجموع:</span><span>{fmtHours(totalMins)}</span>
+                  </div>
                 </div>
               )
             })
